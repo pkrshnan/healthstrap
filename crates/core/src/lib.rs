@@ -10,7 +10,10 @@ pub mod command;
 pub mod crc;
 pub mod frame;
 pub mod gatt;
+pub mod offload;
 pub mod reassembler;
 pub mod record;
 
 mod bytes;
+#[cfg(test)]
+mod test_support;

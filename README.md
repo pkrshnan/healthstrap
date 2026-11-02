@@ -10,7 +10,26 @@ one Rust core.
 
 | Path | What it does |
 | --- | --- |
-| `crates/core` | Frames, checksums, reassembly and record decoding. No Bluetooth, fully unit-tested. |
+| `crates/core` | Frames, checksums, reassembly, record decoding and the offload state machine. No Bluetooth, fully unit-tested. |
+| `crates/cli` | The `healthstrap` command for macOS and Linux. |
+
+## Use
+
+Close or log out of the WHOOP app first: only one device can hold the strap's connection.
+
+```sh
+cargo run --release -- scan            # list nearby straps
+cargo run --release -- sync            # download history into healthstrap.db
+```
+
+`sync` saves every chunk of history to `healthstrap.db` and only then confirms it to the strap,
+which lets the strap delete it. Run it again any time; frames it already has are skipped.
+
+**Linux** needs BlueZ and the D-Bus headers to build (`sudo apt install bluez libdbus-1-dev
+pkg-config`). If writes fail with an authentication error, pair once with `bluetoothctl`:
+`scan on`, then `pair <address>` and `trust <address>`.
+
+**macOS** asks for Bluetooth permission for your terminal the first time.
 
 ## Checks
 
