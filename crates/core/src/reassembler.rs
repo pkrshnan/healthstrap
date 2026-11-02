@@ -93,7 +93,7 @@ mod tests {
         let frame = encode_command(1, 26, &[1]);
         let (first, second) = frame.split_at(5);
         let mut reassembler = Reassembler::new();
-        assert!(reassembler.push(first).is_empty());
+        assert_eq!(reassembler.push(first), Vec::new());
         assert_eq!(frames(&reassembler.push(second)), 1);
     }
 
