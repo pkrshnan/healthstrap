@@ -20,7 +20,21 @@ Close or log out of the WHOOP app first: only one device can hold the strap's co
 ```sh
 cargo run --release -- scan            # list nearby straps
 cargo run --release -- sync            # download history into healthstrap.db
+cargo run --release -- export --out csv  # write csv/<stream>/<day>.csv to look at
+HEALTHSTRAP_TOKEN=... cargo run --release -- upload --server https://your-server
 ```
+
+`upload` sends only rows it has not sent before, as one gzipped CSV per stream per UTC day:
+`POST <server>/api/ingest/samples/<stream>?day=YYYY-MM-DD` with `Authorization: Bearer <token>`,
+`Content-Type: text/csv` and `Content-Encoding: gzip`. The server merges rows by `ts`, so a
+retried upload is harmless.
+
+| Stream | Columns | Notes |
+| --- | --- | --- |
+| `heart_rate` | `ts,bpm` | About once a second; zero (off wrist) is skipped |
+| `rr_interval` | `ts,ms` | `ts` is the beat that ends the interval, counted back from the record time |
+| `accel` | `ts,x,y,z` | Gravity vector in g, about once a second |
+| `temperature` | `ts,celsius` | Skin temperature; values outside 5–45 °C are skipped |
 
 `sync` saves every chunk of history to `healthstrap.db` and only then confirms it to the strap,
 which lets the strap delete it. Run it again any time; frames it already has are skipped.
