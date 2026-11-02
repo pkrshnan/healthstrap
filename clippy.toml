@@ -3,3 +3,5 @@ allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
 doc-valid-idents = ["SQLite", "macOS", ".."]
+too-many-lines-threshold = 60
+cognitive-complexity-threshold = 15

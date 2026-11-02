@@ -122,7 +122,9 @@ async fn await_reply(
             match reply.outcome {
                 Outcome::Pending => {}
                 Outcome::Success => return Ok(()),
-                other => bail!("command {command} failed: {other:?}"),
+                Outcome::Failure | Outcome::Unsupported | Outcome::Unknown(_) => {
+                    bail!("command {command} failed: {:?}", reply.outcome);
+                }
             }
         }
         bail!("strap disconnected waiting for command {command}")
