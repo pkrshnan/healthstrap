@@ -17,7 +17,7 @@ After=bluetooth.service network-online.target
 
 [Service]
 EnvironmentFile=/etc/healthstrap/env
-ExecStart=/usr/local/bin/healthstrap daemon --server ${HEALTHSTRAP_SERVER} --db ${STATE_DIRECTORY}/healthstrap.db
+ExecStart=/usr/local/bin/healthstrap daemon --server ${HEALTHSTRAP_SERVER} --db /var/lib/healthstrap/healthstrap.db
 StateDirectory=healthstrap
 DynamicUser=yes
 # BlueZ lets members of the bluetooth group use the adapter over D-Bus.
