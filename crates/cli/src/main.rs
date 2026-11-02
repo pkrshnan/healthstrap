@@ -25,6 +25,9 @@ enum Command {
         /// Seconds to scan for.
         #[arg(long, default_value_t = 10)]
         seconds: u64,
+        /// List every Bluetooth device seen, not just straps. For troubleshooting.
+        #[arg(long)]
+        all: bool,
     },
     /// Download the strap's stored history into the local store.
     Sync {
@@ -37,6 +40,9 @@ enum Command {
         /// Seconds to scan for the strap.
         #[arg(long, default_value_t = 15)]
         seconds: u64,
+        /// Print every byte sent to and received from the strap, as hex.
+        #[arg(long)]
+        debug: bool,
     },
     /// Send rows not yet uploaded to the command-center server.
     /// Reads the API token from the `HEALTHSTRAP_TOKEN` environment variable.
@@ -78,16 +84,13 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().command {
-        Command::Scan { seconds } => {
-            for strap in ble::scan(Duration::from_secs(seconds)).await? {
-                println!("{}\t{}", strap.id, strap.name.unwrap_or_default());
-            }
-        }
+        Command::Scan { seconds, all } => scan(seconds, all).await?,
         Command::Sync {
             device,
             db,
             seconds,
-        } => sync(device.as_deref(), &db, seconds).await?,
+            debug,
+        } => sync(device.as_deref(), &db, seconds, debug).await?,
         Command::Upload { server, db } => upload(&db, &server, &token()?)?,
         Command::Daemon {
             server,
@@ -103,11 +106,27 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn sync(device: Option<&str>, db: &Path, seconds: u64) -> Result<()> {
+async fn scan(seconds: u64, all: bool) -> Result<()> {
+    let found = ble::scan(Duration::from_secs(seconds), all).await?;
+    if found.is_empty() {
+        eprintln!("{NOT_FOUND}");
+    }
+    for device in found {
+        let connected = if device.connected { "\tconnected" } else { "" };
+        let name = device.name.unwrap_or_else(|| "(no name)".to_owned());
+        println!("{}\t{name}{connected}", device.id);
+    }
+    Ok(())
+}
+
+async fn sync(device: Option<&str>, db: &Path, seconds: u64, debug: bool) -> Result<()> {
     let mut store = store::Store::open(db)?;
-    let strap = pick(ble::scan(Duration::from_secs(seconds)).await?, device)?;
+    let strap = pick(
+        ble::scan(Duration::from_secs(seconds), false).await?,
+        device,
+    )?;
     println!("syncing {}", strap.id);
-    let link = ble::Link::open(strap.peripheral).await?;
+    let link = ble::Link::open(strap.peripheral, debug).await?;
     let result = sync::run(&link, &mut store, &strap.id).await;
     link.close().await;
     let summary = result?;
@@ -135,7 +154,7 @@ async fn daemon(server: &str, device: Option<&str>, db: &Path, every_minutes: u6
     let token = token()?;
     let pause = Duration::from_secs(every_minutes.saturating_mul(60));
     loop {
-        if let Err(error) = sync(device, db, 15).await {
+        if let Err(error) = sync(device, db, 15, false).await {
             eprintln!("sync failed: {error:#}");
         }
         // Uploading blocks on the network; let the runtime move other work off this thread.
@@ -150,15 +169,17 @@ fn token() -> Result<String> {
     std::env::var("HEALTHSTRAP_TOKEN").context("set HEALTHSTRAP_TOKEN to the server's API token")
 }
 
+const NOT_FOUND: &str = "no strap found. Turn off Bluetooth on your phone (a strap connected to \
+     it stops advertising), keep the strap close and off the charger, then try again. \
+     `healthstrap scan --all` lists every device this computer can see.";
+
 fn pick(found: Vec<ble::Found>, wanted: Option<&str>) -> Result<ble::Found> {
     let mut matches: Vec<_> = found
         .into_iter()
         .filter(|f| wanted.is_none_or(|w| f.id == w || f.name.as_deref() == Some(w)))
         .collect();
     match matches.len() {
-        0 => {
-            bail!("no strap found; take it off the charger, keep it close and close the WHOOP app")
-        }
+        0 => bail!(NOT_FOUND),
         1 => Ok(matches.remove(0)),
         _ => bail!("several straps found; pick one with --device (see `healthstrap scan`)"),
     }

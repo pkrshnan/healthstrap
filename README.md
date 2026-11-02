@@ -51,9 +51,26 @@ retried upload is harmless.
 `sync` saves every chunk of history to `healthstrap.db` and only then confirms it to the strap,
 which lets the strap delete it. Run it again any time; frames it already has are skipped.
 
-**Linux** needs BlueZ and the D-Bus headers to build (`sudo apt install bluez libdbus-1-dev
-pkg-config`). If writes fail with an authentication error, pair once with `bluetoothctl`:
-`scan on`, then `pair <address>` and `trust <address>`.
+**Linux** needs BlueZ running and the D-Bus headers to build:
+
+- Arch: `sudo pacman -S --needed bluez bluez-utils rustup pkgconf` then `sudo systemctl enable --now bluetooth`
+- Debian/Ubuntu: `sudo apt install bluez libdbus-1-dev pkg-config`
+
+If `scan` finds nothing: turn off Bluetooth on your phone (a strap connected to it stops
+advertising), check `bluetoothctl show` says `Powered: yes` (`rfkill unblock bluetooth` and
+`bluetoothctl power on` if not), and try `healthstrap scan --all` to list every device in range.
+### Pairing (once per computer)
+
+The strap only answers commands over a paired, encrypted link, and it holds **one pairing at a
+time**. If `sync` times out waiting for a reply, it is not paired with this computer:
+
+1. Turn off Bluetooth on your phone, or forget the strap there.
+2. `bluetoothctl remove <address>` to clear any half-finished pairing.
+3. Put the strap in pairing mode: tap the sensor firmly and repeatedly until the LEDs flash blue.
+4. In `bluetoothctl`: `scan on`, wait for the strap, then `pair <address>` and `trust <address>`.
+
+`pair` failing with AuthenticationFailed means the pairing window closed; repeat steps 2–4.
+`healthstrap sync --debug` prints every byte sent and received if it still stalls.
 
 **macOS** asks for Bluetooth permission for your terminal the first time.
 
