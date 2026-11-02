@@ -1,0 +1,20 @@
+[package]
+name = "healthstrap"
+version = "0.1.0"
+description = "Syncs a WHOOP 5.0 strap over Bluetooth on macOS and Linux."
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = "1"
+btleplug = "0.13"
+clap = { version = "4", features = ["derive"] }
+futures = "0.3"
+healthstrap-core = { path = "../core" }
+rusqlite = { version = "0.41", features = ["bundled"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "signal"] }
+uuid = "1"
+
+[lints]
+workspace = true

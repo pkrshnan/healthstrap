@@ -146,21 +146,7 @@ impl Marker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crc::{crc16_modbus, crc32};
-
-    /// Builds a frame as the strap would, with any packet type.
-    fn strap_frame(body: &[u8]) -> Frame {
-        let mut body = body.to_vec();
-        body.resize(body.len().next_multiple_of(4), 0);
-        let declared = u16::try_from(body.len() + 4).unwrap_or_default();
-        let mut bytes = vec![0xAA, 0x01];
-        bytes.extend_from_slice(&declared.to_le_bytes());
-        bytes.extend_from_slice(&[0x01, 0x00]);
-        bytes.extend_from_slice(&crc16_modbus(&bytes).to_le_bytes());
-        bytes.extend_from_slice(&body);
-        bytes.extend_from_slice(&crc32(&body).to_le_bytes());
-        Frame::parse(bytes).unwrap_or_else(|e| unreachable!("test frame invalid: {e:?}"))
-    }
+    use crate::test_support::strap_frame;
 
     #[test]
     fn reads_a_battery_reply() {
