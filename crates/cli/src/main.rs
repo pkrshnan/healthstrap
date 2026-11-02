@@ -48,6 +48,22 @@ enum Command {
         #[arg(long, default_value = "healthstrap.db")]
         db: PathBuf,
     },
+    /// Keep running: sync and upload, then wait, forever. For a server near the strap.
+    /// Reads the API token from the `HEALTHSTRAP_TOKEN` environment variable.
+    Daemon {
+        /// Server base URL, for example `https://home.tailnet.ts.net`.
+        #[arg(long)]
+        server: String,
+        /// Strap to use, as `scan` prints it. Defaults to the only strap found.
+        #[arg(long)]
+        device: Option<String>,
+        /// Path of the local store.
+        #[arg(long, default_value = "healthstrap.db")]
+        db: PathBuf,
+        /// Minutes to wait between runs.
+        #[arg(long, default_value_t = 15)]
+        every_minutes: u64,
+    },
     /// Write every stored record as CSV files, one per stream per day.
     Export {
         /// Folder to write into.
@@ -72,12 +88,13 @@ async fn main() -> Result<()> {
             db,
             seconds,
         } => sync(device.as_deref(), &db, seconds).await?,
-        Command::Upload { server, db } => {
-            let token = std::env::var("HEALTHSTRAP_TOKEN")
-                .context("set HEALTHSTRAP_TOKEN to the server's API token")?;
-            let summary = upload::upload(&store::Store::open(&db)?, &server, &token)?;
-            println!("uploaded {} rows in {} files", summary.rows, summary.files);
-        }
+        Command::Upload { server, db } => upload(&db, &server, &token()?)?,
+        Command::Daemon {
+            server,
+            device,
+            db,
+            every_minutes,
+        } => daemon(&server, device.as_deref(), &db, every_minutes).await?,
         Command::Export { out, db } => {
             let files = upload::export_all(&store::Store::open(&db)?, &out)?;
             println!("wrote {files} files to {}", out.display());
@@ -104,6 +121,33 @@ async fn sync(device: Option<&str>, db: &Path, seconds: u64) -> Result<()> {
         summary.chunks, summary.new_frames
     );
     Ok(())
+}
+
+fn upload(db: &Path, server: &str, token: &str) -> Result<()> {
+    let summary = upload::upload(&store::Store::open(db)?, server, token)?;
+    println!("uploaded {} rows in {} files", summary.rows, summary.files);
+    Ok(())
+}
+
+/// Runs sync then upload on a schedule. A failed step is logged and retried next run, so a
+/// strap out of range or a server that is down never stops the loop.
+async fn daemon(server: &str, device: Option<&str>, db: &Path, every_minutes: u64) -> Result<()> {
+    let token = token()?;
+    let pause = Duration::from_secs(every_minutes.saturating_mul(60));
+    loop {
+        if let Err(error) = sync(device, db, 15).await {
+            eprintln!("sync failed: {error:#}");
+        }
+        // Uploading blocks on the network; let the runtime move other work off this thread.
+        if let Err(error) = tokio::task::block_in_place(|| upload(db, server, &token)) {
+            eprintln!("upload failed: {error:#}");
+        }
+        tokio::time::sleep(pause).await;
+    }
+}
+
+fn token() -> Result<String> {
+    std::env::var("HEALTHSTRAP_TOKEN").context("set HEALTHSTRAP_TOKEN to the server's API token")
 }
 
 fn pick(found: Vec<ble::Found>, wanted: Option<&str>) -> Result<ble::Found> {
