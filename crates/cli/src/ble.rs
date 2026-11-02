@@ -1,5 +1,6 @@
 //! Bluetooth: finding the strap, connecting, and moving bytes. Works on macOS and Linux.
 
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -62,11 +63,13 @@ pub async fn scan(duration: Duration, everything: bool) -> Result<Vec<Found>> {
 pub struct Link {
     peripheral: Peripheral,
     command: Characteristic,
+    debug: bool,
 }
 
 impl Link {
     /// Connects, discovers services and subscribes to every notify characteristic.
-    pub async fn open(peripheral: Peripheral) -> Result<Self> {
+    /// With `debug`, every byte sent and received is printed to stderr as hex.
+    pub async fn open(peripheral: Peripheral, debug: bool) -> Result<Self> {
         peripheral.connect().await.context("connecting")?;
         peripheral
             .discover_services()
@@ -85,21 +88,40 @@ impl Link {
             let uuid = parse_uuid(uuid)?;
             if let Some(characteristic) = characteristics.iter().find(|c| c.uuid == uuid) {
                 peripheral.subscribe(characteristic).await?;
+                if debug {
+                    eprintln!("subscribed {uuid}");
+                }
+            } else if debug {
+                eprintln!("missing {uuid}");
             }
         }
         Ok(Self {
             peripheral,
             command,
+            debug,
         })
     }
 
     /// Every notification's bytes, from all subscribed characteristics, in arrival order.
     pub async fn notifications(&self) -> Result<impl Stream<Item = Vec<u8>> + use<>> {
-        Ok(self.peripheral.notifications().await?.map(|n| n.value))
+        let debug = self.debug;
+        Ok(self
+            .peripheral
+            .notifications()
+            .await?
+            .map(move |notification| {
+                if debug {
+                    eprintln!("<- {} {}", notification.uuid, hex(&notification.value));
+                }
+                notification.value
+            }))
     }
 
     /// Writes one command frame and waits for the write to be confirmed.
     pub async fn send(&self, frame: &[u8]) -> Result<()> {
+        if self.debug {
+            eprintln!("-> {}", hex(frame));
+        }
         self.peripheral
             .write(&self.command, frame, WriteType::WithResponse)
             .await
@@ -118,6 +140,13 @@ async fn first_adapter() -> Result<Adapter> {
         bail!("no Bluetooth adapter found");
     };
     Ok(adapter)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().fold(String::new(), |mut text, byte| {
+        let _ = write!(text, "{byte:02x}");
+        text
+    })
 }
 
 fn parse_uuid(text: &str) -> Result<Uuid> {

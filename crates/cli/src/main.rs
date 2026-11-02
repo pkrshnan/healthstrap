@@ -40,6 +40,9 @@ enum Command {
         /// Seconds to scan for the strap.
         #[arg(long, default_value_t = 15)]
         seconds: u64,
+        /// Print every byte sent to and received from the strap, as hex.
+        #[arg(long)]
+        debug: bool,
     },
     /// Send rows not yet uploaded to the command-center server.
     /// Reads the API token from the `HEALTHSTRAP_TOKEN` environment variable.
@@ -86,7 +89,8 @@ async fn main() -> Result<()> {
             device,
             db,
             seconds,
-        } => sync(device.as_deref(), &db, seconds).await?,
+            debug,
+        } => sync(device.as_deref(), &db, seconds, debug).await?,
         Command::Upload { server, db } => upload(&db, &server, &token()?)?,
         Command::Daemon {
             server,
@@ -115,14 +119,14 @@ async fn scan(seconds: u64, all: bool) -> Result<()> {
     Ok(())
 }
 
-async fn sync(device: Option<&str>, db: &Path, seconds: u64) -> Result<()> {
+async fn sync(device: Option<&str>, db: &Path, seconds: u64, debug: bool) -> Result<()> {
     let mut store = store::Store::open(db)?;
     let strap = pick(
         ble::scan(Duration::from_secs(seconds), false).await?,
         device,
     )?;
     println!("syncing {}", strap.id);
-    let link = ble::Link::open(strap.peripheral).await?;
+    let link = ble::Link::open(strap.peripheral, debug).await?;
     let result = sync::run(&link, &mut store, &strap.id).await;
     link.close().await;
     let summary = result?;
@@ -150,7 +154,7 @@ async fn daemon(server: &str, device: Option<&str>, db: &Path, every_minutes: u6
     let token = token()?;
     let pause = Duration::from_secs(every_minutes.saturating_mul(60));
     loop {
-        if let Err(error) = sync(device, db, 15).await {
+        if let Err(error) = sync(device, db, 15, false).await {
             eprintln!("sync failed: {error:#}");
         }
         // Uploading blocks on the network; let the runtime move other work off this thread.
