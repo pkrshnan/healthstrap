@@ -17,29 +17,40 @@ pub struct Found {
     pub id: String,
     /// Advertised name, if any.
     pub name: Option<String>,
+    /// Whether this computer already holds a connection to it.
+    pub connected: bool,
     /// The handle used to connect.
     pub peripheral: Peripheral,
 }
 
-/// Scans for straps advertising the WHOOP 5.0 service.
-pub async fn scan(duration: Duration) -> Result<Vec<Found>> {
+/// Scans for nearby straps. With `everything`, returns every device seen, for troubleshooting.
+///
+/// The scan itself is unfiltered, and a device counts as a strap if it advertises the WHOOP 5.0
+/// service or its name contains "whoop". Some straps only show their name, and a strap `BlueZ`
+/// already knows may list its services without advertising them.
+pub async fn scan(duration: Duration, everything: bool) -> Result<Vec<Found>> {
     let adapter = first_adapter().await?;
     let service = parse_uuid(gatt::SERVICE)?;
-    adapter
-        .start_scan(ScanFilter {
-            services: vec![service],
-        })
-        .await?;
+    adapter.start_scan(ScanFilter::default()).await?;
     tokio::time::sleep(duration).await;
-    adapter.stop_scan().await?;
+    // BlueZ answers "No discovery started" if discovery already ended on its own. The results
+    // gathered so far are still valid, so a failed stop is not an error.
+    if let Err(error) = adapter.stop_scan().await {
+        eprintln!("note: stopping the scan: {error}");
+    }
 
     let mut found = Vec::new();
     for peripheral in adapter.peripherals().await? {
         let properties = peripheral.properties().await?.unwrap_or_default();
-        if properties.services.contains(&service) || peripheral.is_connected().await? {
+        let named_whoop = properties
+            .local_name
+            .as_deref()
+            .is_some_and(|name| name.to_lowercase().contains("whoop"));
+        if everything || named_whoop || properties.services.contains(&service) {
             found.push(Found {
                 id: peripheral.id().to_string(),
                 name: properties.local_name,
+                connected: peripheral.is_connected().await?,
                 peripheral,
             });
         }

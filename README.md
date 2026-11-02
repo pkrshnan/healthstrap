@@ -51,9 +51,16 @@ retried upload is harmless.
 `sync` saves every chunk of history to `healthstrap.db` and only then confirms it to the strap,
 which lets the strap delete it. Run it again any time; frames it already has are skipped.
 
-**Linux** needs BlueZ and the D-Bus headers to build (`sudo apt install bluez libdbus-1-dev
-pkg-config`). If writes fail with an authentication error, pair once with `bluetoothctl`:
-`scan on`, then `pair <address>` and `trust <address>`.
+**Linux** needs BlueZ running and the D-Bus headers to build:
+
+- Arch: `sudo pacman -S --needed bluez bluez-utils rustup pkgconf` then `sudo systemctl enable --now bluetooth`
+- Debian/Ubuntu: `sudo apt install bluez libdbus-1-dev pkg-config`
+
+If `scan` finds nothing: turn off Bluetooth on your phone (a strap connected to it stops
+advertising), check `bluetoothctl show` says `Powered: yes` (`rfkill unblock bluetooth` and
+`bluetoothctl power on` if not), and try `healthstrap scan --all` to list every device in range.
+If writes fail with an authentication error, pair once with `bluetoothctl`: `scan on`, then
+`pair <address>` and `trust <address>`.
 
 **macOS** asks for Bluetooth permission for your terminal the first time.
 

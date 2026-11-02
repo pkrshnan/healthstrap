@@ -2,6 +2,6 @@ allow-indexing-slicing-in-tests = true
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
-doc-valid-idents = ["SQLite", "macOS", ".."]
+doc-valid-idents = ["SQLite", "macOS", "BlueZ", ".."]
 too-many-lines-threshold = 60
 cognitive-complexity-threshold = 15
