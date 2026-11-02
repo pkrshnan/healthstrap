@@ -22,7 +22,19 @@ cargo run --release -- scan            # list nearby straps
 cargo run --release -- sync            # download history into healthstrap.db
 cargo run --release -- export --out csv  # write csv/<stream>/<day>.csv to look at
 HEALTHSTRAP_TOKEN=... cargo run --release -- upload --server https://your-server
+HEALTHSTRAP_TOKEN=... cargo run --release -- daemon --server https://your-server
 ```
+
+`daemon` repeats sync then upload every 15 minutes (`--every-minutes`). A strap out of range or
+a server that is down is logged and retried next time, so it can run unattended.
+
+## Run on the Linux server
+
+[`deploy/healthstrap.service`](deploy/healthstrap.service) is a systemd unit for `daemon`; the
+install steps are at the top of the file. The token lives in `/etc/healthstrap/env`, readable
+only by root, and the store in `/var/lib/healthstrap`. Pair the strap once with `bluetoothctl`
+before starting it. If the service cannot reach the adapter, check that your distribution's
+BlueZ policy allows the `bluetooth` group (`/etc/dbus-1/system.d/bluetooth.conf`).
 
 `upload` sends only rows it has not sent before, as one gzipped CSV per stream per UTC day:
 `POST <server>/api/ingest/samples/<stream>?day=YYYY-MM-DD` with `Authorization: Bearer <token>`,

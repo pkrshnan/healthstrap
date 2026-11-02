@@ -1,0 +1,33 @@
+# Runs healthstrap on a Linux server near the strap: sync, upload, wait, repeat.
+#
+# Install:
+#   sudo install -m 755 target/release/healthstrap /usr/local/bin/
+#   sudo install -m 644 deploy/healthstrap.service /etc/systemd/system/
+#   sudo install -d -m 700 /etc/healthstrap
+#   printf 'HEALTHSTRAP_SERVER=https://your-server\nHEALTHSTRAP_TOKEN=...\n' | sudo tee /etc/healthstrap/env
+#   sudo chmod 600 /etc/healthstrap/env
+#   sudo systemctl daemon-reload && sudo systemctl enable --now healthstrap
+#
+# Logs: journalctl -u healthstrap -f
+
+[Unit]
+Description=Sync the WHOOP strap and upload to the command center
+Wants=bluetooth.service network-online.target
+After=bluetooth.service network-online.target
+
+[Service]
+EnvironmentFile=/etc/healthstrap/env
+ExecStart=/usr/local/bin/healthstrap daemon --server ${HEALTHSTRAP_SERVER} --db /var/lib/healthstrap/healthstrap.db
+StateDirectory=healthstrap
+DynamicUser=yes
+# BlueZ lets members of the bluetooth group use the adapter over D-Bus.
+SupplementaryGroups=bluetooth
+Restart=on-failure
+RestartSec=60
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
