@@ -8,6 +8,7 @@
 
 pub mod command;
 pub mod crc;
+pub mod export;
 pub mod frame;
 pub mod gatt;
 pub mod offload;

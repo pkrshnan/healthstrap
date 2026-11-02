@@ -10,10 +10,12 @@ repository.workspace = true
 anyhow = "1"
 btleplug = "0.13"
 clap = { version = "4", features = ["derive"] }
+flate2 = "1"
 futures = "0.3"
 healthstrap-core = { path = "../core" }
 rusqlite = { version = "0.41", features = ["bundled"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "signal"] }
+ureq = "3"
 uuid = "1"
 
 [lints]

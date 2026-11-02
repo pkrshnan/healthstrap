@@ -8,7 +8,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use healthstrap_core::command::EndToken;
 use healthstrap_core::frame::Frame;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS frames (
@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS chunks (
     committed_at_ms INTEGER NOT NULL,
     token BLOB NOT NULL,
     frame_count INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS upload_cursor (
+    server TEXT PRIMARY KEY,
+    last_frame_id INTEGER NOT NULL
 );
 ";
 
@@ -84,6 +88,45 @@ impl Store {
         transaction.commit()?;
         Ok(inserted)
     }
+
+    /// Frames with an id above `after`, oldest first, with their ids.
+    pub fn frames_after(&self, after: i64) -> Result<Vec<(i64, Frame)>> {
+        let mut query = self
+            .connection
+            .prepare("SELECT id, bytes FROM frames WHERE id > ?1 ORDER BY id")?;
+        let rows = query.query_map([after], |row| Ok((row.get(0)?, row.get::<_, Vec<u8>>(1)?)))?;
+        let mut frames = Vec::new();
+        for row in rows {
+            let (id, bytes) = row?;
+            // Only checked frames are ever stored, so a failure here means the file was damaged.
+            let frame = Frame::parse(bytes).map_err(|e| anyhow::anyhow!("frame {id}: {e:?}"))?;
+            frames.push((id, frame));
+        }
+        Ok(frames)
+    }
+
+    /// The id of the last frame already uploaded to `server`, or 0.
+    pub fn upload_cursor(&self, server: &str) -> Result<i64> {
+        let cursor = self
+            .connection
+            .query_row(
+                "SELECT last_frame_id FROM upload_cursor WHERE server = ?1",
+                [server],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(cursor.unwrap_or(0))
+    }
+
+    /// Records that every frame up to `last_frame_id` reached `server`.
+    pub fn set_upload_cursor(&self, server: &str, last_frame_id: i64) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO upload_cursor (server, last_frame_id) VALUES (?1, ?2)
+             ON CONFLICT (server) DO UPDATE SET last_frame_id = excluded.last_frame_id",
+            params![server, last_frame_id],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -115,5 +158,24 @@ mod tests {
             store.commit_chunk("other", 1, &[frame(2)], None).unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn tracks_upload_progress_per_server() {
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        store
+            .commit_chunk("strap", 0, &[frame(1), frame(2), frame(3)], None)
+            .unwrap();
+        assert_eq!(store.upload_cursor("home").unwrap(), 0);
+        store.set_upload_cursor("home", 2).unwrap();
+        assert_eq!(store.upload_cursor("home").unwrap(), 2);
+        assert_eq!(store.upload_cursor("other").unwrap(), 0);
+        let ids: Vec<i64> = store
+            .frames_after(2)
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(ids, vec![3]);
     }
 }
