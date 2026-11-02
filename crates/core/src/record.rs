@@ -27,6 +27,15 @@ pub struct BiometricSummary {
     pub gravity: [f32; 3],
     /// Skin temperature in °C, if within 5–45 °C.
     pub skin_temperature_c: Option<f32>,
+    /// Motion intensity, unscaled. Inferred: about 0.006 asleep and 0.03 awake.
+    pub motion: f32,
+    /// Looks like the log of motion over a longer window. Inferred, window unknown.
+    pub motion_long: f32,
+    /// Cumulative counter that only rises while awake, about 8,000 a day. Inferred to be
+    /// steps. It is 16 bits, so it wraps, and it may reset when the strap reboots.
+    pub step_counter: u16,
+    /// Two more temperature-like readings, raw. Possibly °C × 10. Meaning not confirmed.
+    pub temperature_aux: [u16; 2],
 }
 
 impl BiometricSummary {
@@ -48,6 +57,10 @@ impl BiometricSummary {
             rr_intervals_ms: rr_intervals(bytes, 24, rr_count),
             gravity: [f32_at(bytes, 45)?, f32_at(bytes, 49)?, f32_at(bytes, 53)?],
             skin_temperature_c: skin_temperature(u16_at(bytes, 73)?),
+            motion: f32_at(bytes, 41)?,
+            motion_long: f32_at(bytes, 113)?,
+            step_counter: u16_at(bytes, 57)?,
+            temperature_aux: [u16_at(bytes, 69)?, u16_at(bytes, 71)?],
         })
     }
 }
@@ -112,6 +125,11 @@ mod tests {
         put(22, &[61, 2]);
         put(24, &1024_u16.to_le_bytes());
         put(26, &980_u16.to_le_bytes());
+        put(41, &0.25_f32.to_le_bytes());
+        put(57, &1234_u16.to_le_bytes());
+        put(69, &318_u16.to_le_bytes());
+        put(71, &329_u16.to_le_bytes());
+        put(113, &(-5.0_f32).to_le_bytes());
         put(45, &0.0_f32.to_le_bytes());
         put(49, &0.0_f32.to_le_bytes());
         put(53, &1.0_f32.to_le_bytes());
@@ -131,6 +149,10 @@ mod tests {
                 rr_intervals_ms: vec![1000, 957],
                 gravity: [0.0, 0.0, 1.0],
                 skin_temperature_c: Some(34.12),
+                motion: 0.25,
+                motion_long: -5.0,
+                step_counter: 1234,
+                temperature_aux: [318, 329],
             })
         );
     }
