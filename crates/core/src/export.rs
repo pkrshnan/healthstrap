@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 
 use crate::frame::Frame;
 use crate::log::{self, Fact};
-use crate::record::BiometricSummary;
+use crate::record::{BiometricSummary, OpticalWindow};
 
 /// A stream the ingest API accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -36,11 +36,13 @@ pub enum Stream {
     Battery,
     /// Other strap events: `double_tap`, `spo2_computed`.
     Events,
+    /// Raw optical samples at 25 Hz, during the strap's short bursts.
+    Ppg,
 }
 
 impl Stream {
     /// Every stream, in a stable order.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::HeartRate,
         Self::RrInterval,
         Self::Accel,
@@ -52,6 +54,7 @@ impl Stream {
         Self::SleepState,
         Self::Battery,
         Self::Events,
+        Self::Ppg,
     ];
 
     /// The name used in the upload path.
@@ -69,6 +72,7 @@ impl Stream {
             Self::SleepState => "sleep_state",
             Self::Battery => "battery",
             Self::Events => "events",
+            Self::Ppg => "ppg",
         }
     }
 
@@ -87,6 +91,7 @@ impl Stream {
             Self::SleepState => "ts,state",
             Self::Battery => "ts,pct,charging",
             Self::Events => "ts,kind",
+            Self::Ppg => "ts,burst,value,accepted,motion",
         }
     }
 }
@@ -115,6 +120,7 @@ pub fn batch<'a>(frames: impl IntoIterator<Item = &'a Frame>) -> Batches {
         let mut found = BiometricSummary::parse(frame)
             .map(|summary| rows(&summary))
             .unwrap_or_default();
+        found.extend(OpticalWindow::parse(frame).map_or_else(Vec::new, |w| ppg_rows(&w)));
         for line in joiner.push(frame) {
             if let Some(fact) = Fact::parse(&line.message) {
                 let ts_ms = i64::from(line.unix_seconds) * 1000;
@@ -234,6 +240,25 @@ fn raw_rows(ts_ms: i64, summary: &BiometricSummary) -> Vec<(Stream, Row)> {
     rows.push((Stream::TemperatureAux, row(format!("{t1},{t2}"))));
     rows
 }
+
+/// One row per optical sample, 40 ms apart from the window's second.
+fn ppg_rows(window: &OpticalWindow) -> Vec<(Stream, Row)> {
+    let start_ms = i64::from(window.unix_seconds) * 1000;
+    let accepted = flag(window.accepted);
+    (0_i64..)
+        .zip(&window.samples)
+        .map(|(i, value)| {
+            let row = Row {
+                ts_ms: start_ms + i * SAMPLE_MS,
+                values: format!("{},{value},{accepted},{}", window.burst, window.motion),
+            };
+            (Stream::Ppg, row)
+        })
+        .collect()
+}
+
+/// Spacing of optical samples: 25 Hz.
+const SAMPLE_MS: i64 = 40;
 
 /// Gives each interval its own timestamp: the beat that ends it. The last interval ends at
 /// the record's time and earlier ones are counted back from there. The strap does not send

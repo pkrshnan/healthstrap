@@ -3,7 +3,7 @@
 //! Offsets are absolute in the whole frame. Fields with no established meaning are left out
 //! here; the raw frame is kept elsewhere so they can be decoded later.
 
-use crate::bytes::{f32_at, u8_at, u16_at, u32_at};
+use crate::bytes::{f32_at, i16_at, i32_at, u8_at, u16_at, u32_at};
 use crate::frame::{Frame, packet_type};
 
 /// Layout byte (frame byte 9) of the per-second biometric summary.
@@ -61,6 +61,63 @@ impl BiometricSummary {
             motion_long: f32_at(bytes, 113)?,
             step_counter: u16_at(bytes, 57)?,
             temperature_aux: [u16_at(bytes, 69)?, u16_at(bytes, 71)?],
+        })
+    }
+}
+
+/// Layout byte (frame byte 9) of the one-second raw optical window.
+pub const LAYOUT_OPTICAL: u8 = 26;
+
+const OPTICAL_LEN: usize = 88;
+const OPTICAL_DELTAS: usize = 24;
+const OPTICAL_DELTA_START: usize = 27;
+/// A delta at either limit was clipped, so the true jump is lost.
+const CLIPPED: [i16; 2] = [i16::MAX, -i16::MAX];
+
+/// One second of raw optical (PPG) samples at 25 Hz, stored by the strap in short bursts.
+///
+/// Layout as documented by NOOP and checked against a real capture.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpticalWindow {
+    /// Strap clock, Unix seconds, of the first sample.
+    pub unix_seconds: u32,
+    /// Burst counter: rises once per burst, about every 20 minutes, and sometimes resets.
+    pub burst: u16,
+    /// Raw sample values, oldest first, 1/25 s apart. Cut short at a clipped jump.
+    pub samples: Vec<i64>,
+    /// Whether the strap accepted the window's signal.
+    pub accepted: bool,
+    /// Motion during the window, unscaled.
+    pub motion: f32,
+}
+
+impl OpticalWindow {
+    /// Decodes a window, or `None` if the frame is some other record.
+    #[must_use]
+    pub fn parse(frame: &Frame) -> Option<Self> {
+        let bytes = frame.bytes();
+        if frame.packet_type() != packet_type::HISTORICAL
+            || u8_at(bytes, 9)? != LAYOUT_OPTICAL
+            || bytes.len() != OPTICAL_LEN
+        {
+            return None;
+        }
+        let mut value = i64::from(i32_at(bytes, 23)?);
+        let mut samples = vec![value];
+        for i in 0..OPTICAL_DELTAS {
+            let delta = i16_at(bytes, OPTICAL_DELTA_START + 2 * i)?;
+            if CLIPPED.contains(&delta) {
+                break;
+            }
+            value += i64::from(delta);
+            samples.push(value);
+        }
+        Some(Self {
+            unix_seconds: u32_at(bytes, 15)?,
+            burst: u16_at(bytes, 21)?,
+            samples,
+            accepted: u8_at(bytes, 82)? == 1,
+            motion: f32_at(bytes, 75)?,
         })
     }
 }
@@ -153,6 +210,34 @@ mod tests {
                 motion_long: -5.0,
                 step_counter: 1234,
                 temperature_aux: [318, 329],
+            })
+        );
+    }
+
+    #[test]
+    fn decodes_an_optical_window_and_stops_at_a_clipped_jump() {
+        let mut frame = vec![0_u8; 84];
+        let mut put = |offset: usize, value: &[u8]| {
+            frame.splice(offset..offset + value.len(), value.iter().copied());
+        };
+        put(8, &[packet_type::HISTORICAL, LAYOUT_OPTICAL]);
+        put(15, &1_793_600_000_u32.to_le_bytes());
+        put(21, &7_u16.to_le_bytes());
+        put(23, &(-16_i32).to_le_bytes());
+        put(27, &5_i16.to_le_bytes());
+        put(29, &(-3_i16).to_le_bytes());
+        put(31, &i16::MAX.to_le_bytes());
+        put(75, &0.5_f32.to_le_bytes());
+        put(82, &[1]);
+        let window = OpticalWindow::parse(&strap_frame(&frame.split_off(8)));
+        assert_eq!(
+            window,
+            Some(OpticalWindow {
+                unix_seconds: 1_793_600_000,
+                burst: 7,
+                samples: vec![-16, -11, -14],
+                accepted: true,
+                motion: 0.5,
             })
         );
     }

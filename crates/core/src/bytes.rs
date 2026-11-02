@@ -17,3 +17,11 @@ pub fn u32_at(data: &[u8], offset: usize) -> Option<u32> {
 pub fn f32_at(data: &[u8], offset: usize) -> Option<f32> {
     u32_at(data, offset).map(f32::from_bits)
 }
+
+pub fn i16_at(data: &[u8], offset: usize) -> Option<i16> {
+    u16_at(data, offset).map(|value| i16::from_le_bytes(value.to_le_bytes()))
+}
+
+pub fn i32_at(data: &[u8], offset: usize) -> Option<i32> {
+    u32_at(data, offset).map(|value| i32::from_le_bytes(value.to_le_bytes()))
+}

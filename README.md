@@ -54,6 +54,7 @@ retried upload is harmless.
 | `sleep_state` | `ts,state` | The strap's own sleep state (`WAKE`, `STILL`, `SLEEP`, `UP`), at each change |
 | `battery` | `ts,pct,charging` | Each column is empty until first seen |
 | `events` | `ts,kind` | `double_tap`, `spo2_computed` |
+| `ppg` | `ts,burst,value,accepted,motion` | Raw optical samples at 25 Hz, in bursts of about a minute; `accepted` is 1/0 |
 
 The last four come from the strap's firmware debug log (packet type 50), matched against
 messages seen on firmware 3.30.5.0.
