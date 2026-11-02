@@ -1,0 +1,10 @@
+[package]
+name = "healthstrap-core"
+version = "0.1.0"
+description = "Framing, decoding and export for the WHOOP 5.0 strap protocol. No Bluetooth."
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
