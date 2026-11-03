@@ -1,4 +1,5 @@
-# Runs healthstrap on a Linux server near the strap: sync, upload, wait, repeat.
+# Runs healthstrap on a Linux server near the strap: it listens for the strap and syncs and
+# uploads whenever the strap is in range.
 #
 # Install:
 #   sudo install -m 755 target/release/healthstrap /usr/local/bin/
@@ -22,8 +23,8 @@ StateDirectory=healthstrap
 DynamicUser=yes
 # BlueZ lets members of the bluetooth group use the adapter over D-Bus.
 SupplementaryGroups=bluetooth
-Restart=on-failure
-RestartSec=60
+Restart=always
+RestartSec=30
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

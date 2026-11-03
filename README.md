@@ -25,8 +25,15 @@ HEALTHSTRAP_TOKEN=... cargo run --release -- upload --server https://your-server
 HEALTHSTRAP_TOKEN=... cargo run --release -- daemon --server https://your-server
 ```
 
-`daemon` repeats sync then upload every 15 minutes (`--every-minutes`). A strap out of range or
-a server that is down is logged and retried next time, so it can run unattended.
+`daemon` keeps a Bluetooth scan running and syncs as soon as it hears the strap advertise, so
+walking back into range starts a sync within seconds. While the strap stays in range it syncs
+again every 15 minutes (`--every-minutes`). A sync that fails while the strap is nearby is retried
+after 1, 2, 4, 8 minutes, up to that interval, and an upload that fails is retried every few
+minutes even while the strap is away. It logs only changes (`strap in range`, `strap out of
+range; listening`), so it can run unattended.
+
+The strap stops advertising while something else holds its connection, such as your phone, so
+keep the phone's Bluetooth off for the strap or the daemon will treat it as away.
 
 ## Run on the Linux server
 
