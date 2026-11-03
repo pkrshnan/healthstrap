@@ -92,6 +92,14 @@ time**. If `sync` times out waiting for a reply, it is not paired with this comp
 
 **macOS** asks for Bluetooth permission for your terminal the first time.
 
+## Run in Docker
+
+[`deploy/Dockerfile`](deploy/Dockerfile) builds an image that runs `daemon`. The home server's
+docker compose project in [pkrshnan/dashboardify](https://github.com/pkrshnan/dashboardify/tree/main/deploy)
+uses it. The container talks to the host's BlueZ through the mounted
+`/run/dbus/system_bus_socket`, so pair the strap on the host first. Run either the container or
+the systemd unit, not both: the strap holds one connection, so two daemons would fight over it.
+
 ## Checks
 
 ```sh
