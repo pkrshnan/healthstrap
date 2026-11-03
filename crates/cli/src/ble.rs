@@ -5,9 +5,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use btleplug::api::{
-    Central, Characteristic, Manager as _, Peripheral as _, ScanFilter, WriteType,
+    Central, CentralEvent, Characteristic, Manager as _, Peripheral as _, PeripheralProperties,
+    ScanFilter, WriteType,
 };
-use btleplug::platform::{Adapter, Manager, Peripheral};
+use btleplug::platform::{Adapter, Manager, Peripheral, PeripheralId};
 use futures::{Stream, StreamExt};
 use healthstrap_core::gatt;
 use uuid::Uuid;
@@ -43,11 +44,7 @@ pub async fn scan(duration: Duration, everything: bool) -> Result<Vec<Found>> {
     let mut found = Vec::new();
     for peripheral in adapter.peripherals().await? {
         let properties = peripheral.properties().await?.unwrap_or_default();
-        let named_whoop = properties
-            .local_name
-            .as_deref()
-            .is_some_and(|name| name.to_lowercase().contains("whoop"));
-        if everything || named_whoop || properties.services.contains(&service) {
+        if everything || is_strap(&properties, &service) {
             found.push(Found {
                 id: peripheral.id().to_string(),
                 name: properties.local_name,
@@ -57,6 +54,83 @@ pub async fn scan(duration: Duration, everything: bool) -> Result<Vec<Found>> {
         }
     }
     Ok(found)
+}
+
+/// Listens for up to `limit` for a strap that is advertising right now, which means it is in
+/// range and free to connect. Returns `None` if none was heard. With `wanted`, only the strap
+/// with that id or name counts.
+///
+/// `BlueZ` remembers paired devices and lists them even when they are far away, so a device in
+/// its cache does not count: only a fresh advertisement, or a device with a signal strength from
+/// this scan, does.
+pub async fn wait_for_strap(wanted: Option<&str>, limit: Duration) -> Result<Option<Found>> {
+    let adapter = first_adapter().await?;
+    let service = parse_uuid(gatt::SERVICE)?;
+    let mut events = adapter.events().await?;
+    adapter.start_scan(ScanFilter::default()).await?;
+    let heard = tokio::time::timeout(limit, async {
+        while let Some(event) = events.next().await {
+            let Some((id, live)) = heard_from(event) else {
+                continue;
+            };
+            let peripheral = adapter.peripheral(&id).await?;
+            let properties = peripheral.properties().await?.unwrap_or_default();
+            let nearby = live || properties.rssi.is_some();
+            if nearby
+                && is_strap(&properties, &service)
+                && is_wanted(&peripheral, &properties, wanted)
+            {
+                return Ok::<_, anyhow::Error>(Some(Found {
+                    id: peripheral.id().to_string(),
+                    name: properties.local_name,
+                    connected: peripheral.is_connected().await?,
+                    peripheral,
+                }));
+            }
+        }
+        Ok(None)
+    })
+    .await;
+    // Same as in `scan`: a scan that already ended is fine.
+    let _ = adapter.stop_scan().await;
+    heard.unwrap_or(Ok(None))
+}
+
+/// The device an event is about, and whether the event can only come from a live
+/// advertisement. Discovery events can also be replayed from `BlueZ`'s cache, so they are not.
+fn heard_from(event: CentralEvent) -> Option<(PeripheralId, bool)> {
+    match event {
+        CentralEvent::RssiUpdate { id, .. }
+        | CentralEvent::ManufacturerDataAdvertisement { id, .. }
+        | CentralEvent::ServiceDataAdvertisement { id, .. } => Some((id, true)),
+        CentralEvent::DeviceDiscovered(id)
+        | CentralEvent::DeviceUpdated(id)
+        | CentralEvent::ServicesAdvertisement { id, .. } => Some((id, false)),
+        CentralEvent::DeviceConnected(_)
+        | CentralEvent::DeviceDisconnected(_)
+        | CentralEvent::DeviceServicesModified(_)
+        | CentralEvent::StateUpdate(_) => None,
+    }
+}
+
+/// A device counts as a strap if it advertises the WHOOP 5.0 service or its name contains
+/// "whoop".
+fn is_strap(properties: &PeripheralProperties, service: &Uuid) -> bool {
+    let named_whoop = properties
+        .local_name
+        .as_deref()
+        .is_some_and(|name| name.to_lowercase().contains("whoop"));
+    named_whoop || properties.services.contains(service)
+}
+
+fn is_wanted(
+    peripheral: &Peripheral,
+    properties: &PeripheralProperties,
+    wanted: Option<&str>,
+) -> bool {
+    wanted.is_none_or(|w| {
+        peripheral.id().to_string() == w || properties.local_name.as_deref() == Some(w)
+    })
 }
 
 /// A connected strap with its notifications subscribed.

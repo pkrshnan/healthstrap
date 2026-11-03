@@ -54,7 +54,8 @@ enum Command {
         #[arg(long, default_value = "healthstrap.db")]
         db: PathBuf,
     },
-    /// Keep running: sync and upload, then wait, forever. For a server near the strap.
+    /// Keep running: whenever the strap comes into range, sync and upload, then sync again every
+    /// `--every-minutes` while it stays. For a computer that is always on near the strap.
     /// Reads the API token from the `HEALTHSTRAP_TOKEN` environment variable.
     Daemon {
         /// Server base URL, for example `https://home.tailnet.ts.net`.
@@ -66,7 +67,7 @@ enum Command {
         /// Path of the local store.
         #[arg(long, default_value = "healthstrap.db")]
         db: PathBuf,
-        /// Minutes to wait between runs.
+        /// Minutes to wait between syncs while the strap is in range.
         #[arg(long, default_value_t = 15)]
         every_minutes: u64,
     },
@@ -120,11 +121,15 @@ async fn scan(seconds: u64, all: bool) -> Result<()> {
 }
 
 async fn sync(device: Option<&str>, db: &Path, seconds: u64, debug: bool) -> Result<()> {
-    let mut store = store::Store::open(db)?;
     let strap = pick(
         ble::scan(Duration::from_secs(seconds), false).await?,
         device,
     )?;
+    sync_strap(strap, db, debug).await
+}
+
+async fn sync_strap(strap: ble::Found, db: &Path, debug: bool) -> Result<()> {
+    let mut store = store::Store::open(db)?;
     println!("syncing {}", strap.id);
     let link = ble::Link::open(strap.peripheral, debug).await?;
     let result = sync::run(&link, &mut store, &strap.id).await;
@@ -148,20 +153,102 @@ fn upload(db: &Path, server: &str, token: &str) -> Result<()> {
     Ok(())
 }
 
-/// Runs sync then upload on a schedule. A failed step is logged and retried next run, so a
-/// strap out of range or a server that is down never stops the loop.
+/// How long one listen for the strap lasts before the daemon checks on other work, such as an
+/// upload that failed earlier.
+const LISTEN: Duration = Duration::from_secs(5 * 60);
+
+/// How long to wait before trying again when the Bluetooth adapter itself is unavailable.
+const ADAPTER_RETRY: Duration = Duration::from_secs(60);
+
+/// Listens for the strap and syncs whenever it is in range. Nothing that goes wrong with the
+/// strap, the adapter or the server stops the loop: each is logged and tried again later.
 async fn daemon(server: &str, device: Option<&str>, db: &Path, every_minutes: u64) -> Result<()> {
     let token = token()?;
-    let pause = Duration::from_secs(every_minutes.saturating_mul(60));
+    let every = Duration::from_secs(every_minutes.saturating_mul(60));
+    let mut state = Daemon::default();
+    println!("listening for the strap");
     loop {
-        if let Err(error) = sync(device, db, 15, false).await {
-            eprintln!("sync failed: {error:#}");
+        match ble::wait_for_strap(device, LISTEN).await {
+            Ok(Some(strap)) => {
+                state.arrived();
+                let synced = sync_strap(strap, db, false).await;
+                state.synced(synced);
+                state.uploaded(upload_blocking(db, server, &token));
+                tokio::time::sleep(state.pause(every)).await;
+            }
+            Ok(None) => {
+                state.away();
+                if state.upload_pending {
+                    state.uploaded(upload_blocking(db, server, &token));
+                }
+            }
+            Err(error) => {
+                eprintln!("Bluetooth unavailable: {error:#}");
+                tokio::time::sleep(ADAPTER_RETRY).await;
+            }
         }
-        // Uploading blocks on the network; let the runtime move other work off this thread.
-        if let Err(error) = tokio::task::block_in_place(|| upload(db, server, &token)) {
+    }
+}
+
+/// Uploading blocks on the network; let the runtime move other work off this thread.
+fn upload_blocking(db: &Path, server: &str, token: &str) -> Result<()> {
+    tokio::task::block_in_place(|| upload(db, server, token))
+}
+
+/// What the daemon remembers between rounds, so it logs changes rather than every round and
+/// backs off when syncing keeps failing.
+#[derive(Default)]
+struct Daemon {
+    /// Whether the last listen heard nothing.
+    away: bool,
+    /// Syncs that failed in a row while the strap was in range.
+    failures: u32,
+    /// Whether the last upload failed, so rows are waiting to be sent.
+    upload_pending: bool,
+}
+
+impl Daemon {
+    fn arrived(&mut self) {
+        if self.away {
+            println!("strap in range");
+        }
+        self.away = false;
+    }
+
+    fn away(&mut self) {
+        if !self.away {
+            println!("strap out of range; listening");
+        }
+        self.away = true;
+        self.failures = 0;
+    }
+
+    fn synced(&mut self, result: Result<()>) {
+        match result {
+            Ok(()) => self.failures = 0,
+            Err(error) => {
+                self.failures = self.failures.saturating_add(1);
+                eprintln!("sync failed: {error:#}");
+            }
+        }
+    }
+
+    fn uploaded(&mut self, result: Result<()>) {
+        self.upload_pending = result.is_err();
+        if let Err(error) = result {
             eprintln!("upload failed: {error:#}");
         }
-        tokio::time::sleep(pause).await;
+    }
+
+    /// The wait before the next sync: `every` after a good sync. After failures it starts at a
+    /// minute and doubles each time, up to `every`, so a strap that drops the link mid-sync is
+    /// retried soon without being hammered.
+    fn pause(&self, every: Duration) -> Duration {
+        if self.failures == 0 {
+            return every;
+        }
+        let doublings = self.failures.saturating_sub(1).min(16);
+        Duration::from_secs(60u64 << doublings).min(every)
     }
 }
 
@@ -182,5 +269,47 @@ fn pick(found: Vec<ble::Found>, wanted: Option<&str>) -> Result<ble::Found> {
         0 => bail!(NOT_FOUND),
         1 => Ok(matches.remove(0)),
         _ => bail!("several straps found; pick one with --device (see `healthstrap scan`)"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EVERY: Duration = Duration::from_secs(15 * 60);
+
+    #[test]
+    fn waits_the_full_interval_after_a_good_sync() {
+        assert_eq!(Daemon::default().pause(EVERY), EVERY);
+    }
+
+    #[test]
+    fn backs_off_after_failures_up_to_the_interval() {
+        let mut state = Daemon::default();
+        let mut pauses = Vec::new();
+        for _ in 0..6 {
+            state.synced(Err(anyhow::anyhow!("link lost")));
+            pauses.push(state.pause(EVERY).as_secs() / 60);
+        }
+        assert_eq!(pauses, [1, 2, 4, 8, 15, 15]);
+        state.synced(Ok(()));
+        assert_eq!(state.pause(EVERY), EVERY);
+    }
+
+    #[test]
+    fn leaving_range_resets_the_backoff() {
+        let mut state = Daemon::default();
+        state.synced(Err(anyhow::anyhow!("link lost")));
+        state.away();
+        assert_eq!(state.pause(EVERY), EVERY);
+    }
+
+    #[test]
+    fn remembers_a_failed_upload() {
+        let mut state = Daemon::default();
+        state.uploaded(Err(anyhow::anyhow!("server down")));
+        assert!(state.upload_pending);
+        state.uploaded(Ok(()));
+        assert!(!state.upload_pending);
     }
 }
