@@ -70,7 +70,7 @@ impl Link {
     /// Connects, discovers services and subscribes to every notify characteristic.
     /// With `debug`, every byte sent and received is printed to stderr as hex.
     pub async fn open(peripheral: Peripheral, debug: bool) -> Result<Self> {
-        peripheral.connect().await.context("connecting")?;
+        connect(&peripheral).await?;
         peripheral
             .discover_services()
             .await
@@ -131,6 +131,31 @@ impl Link {
     /// Disconnects. Errors are ignored: the link may already be gone.
     pub async fn close(self) {
         let _ = self.peripheral.disconnect().await;
+    }
+}
+
+/// How many times to try connecting before giving up.
+const CONNECT_ATTEMPTS: u32 = 4;
+
+/// Connects, retrying with growing pauses. A strap that just lost a connection can refuse new
+/// ones for a while, which `BlueZ` reports as `le-connection-abort-by-local`.
+async fn connect(peripheral: &Peripheral) -> Result<()> {
+    let mut pause = Duration::from_secs(5);
+    let mut attempt = 1;
+    loop {
+        match peripheral.connect().await {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt < CONNECT_ATTEMPTS => {
+                eprintln!(
+                    "connecting failed ({error}), retrying in {}s",
+                    pause.as_secs()
+                );
+                tokio::time::sleep(pause).await;
+                pause *= 2;
+                attempt += 1;
+            }
+            Err(error) => return Err(error).context("connecting"),
+        }
     }
 }
 

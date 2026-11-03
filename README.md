@@ -47,6 +47,17 @@ retried upload is harmless.
 | `rr_interval` | `ts,ms` | `ts` is the beat that ends the interval, counted back from the record time |
 | `accel` | `ts,x,y,z` | Gravity vector in g, about once a second |
 | `temperature` | `ts,celsius` | Skin temperature; values outside 5–45 °C are skipped |
+| `motion` | `ts,intensity,intensity_long` | Raw, about once a second. Inferred from data, not confirmed |
+| `steps` | `ts,count` | The strap's raw cumulative counter; it wraps at 65535 and may reset. Inferred |
+| `temperature_aux` | `ts,t1,t2` | Two more temperature-like readings, raw. Meaning unknown |
+| `wear` | `ts,on,source` | The strap's own on-body (`1`) / off-body (`0`) decision, at each change |
+| `sleep_state` | `ts,state` | The strap's own sleep state (`WAKE`, `STILL`, `SLEEP`, `UP`), at each change |
+| `battery` | `ts,pct,charging` | Each column is empty until first seen |
+| `events` | `ts,kind` | `double_tap`, `spo2_computed` |
+| `ppg` | `ts,burst,value,accepted,motion` | Raw optical samples at 25 Hz, in bursts of about a minute; `accepted` is 1/0 |
+
+The last four come from the strap's firmware debug log (packet type 50), matched against
+messages seen on firmware 3.30.5.0.
 
 `sync` saves every chunk of history to `healthstrap.db` and only then confirms it to the strap,
 which lets the strap delete it. Run it again any time; frames it already has are skipped.

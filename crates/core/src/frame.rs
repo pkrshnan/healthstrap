@@ -32,6 +32,8 @@ pub mod packet_type {
     pub const EVENT: u8 = 48;
     /// History start, chunk end and complete markers.
     pub const METADATA: u8 = 49;
+    /// A piece of the firmware's plain-text debug log. Lines can span several packets.
+    pub const DEBUG_LOG: u8 = 50;
 }
 
 /// Why bytes were not accepted as a frame.

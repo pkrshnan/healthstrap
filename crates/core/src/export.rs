@@ -8,7 +8,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use crate::frame::Frame;
-use crate::record::BiometricSummary;
+use crate::log::{self, Fact};
+use crate::record::{BiometricSummary, OpticalWindow};
 
 /// A stream the ingest API accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -21,15 +22,39 @@ pub enum Stream {
     Accel,
     /// Skin temperature in °C.
     Temperature,
+    /// Motion intensity and its longer-window companion, raw, about once a second.
+    Motion,
+    /// The strap's cumulative step counter, raw: it wraps and may reset.
+    Steps,
+    /// Two more temperature-like readings, raw.
+    TemperatureAux,
+    /// The strap's own on-body (`1`) and off-body (`0`) decisions, at each change.
+    Wear,
+    /// The strap's own sleep state (`WAKE`, `STILL`, `SLEEP`, `UP`), at each change.
+    SleepState,
+    /// Battery percent and whether it is charging; either may be empty when not yet known.
+    Battery,
+    /// Other strap events: `double_tap`, `spo2_computed`.
+    Events,
+    /// Raw optical samples at 25 Hz, during the strap's short bursts.
+    Ppg,
 }
 
 impl Stream {
     /// Every stream, in a stable order.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 12] = [
         Self::HeartRate,
         Self::RrInterval,
         Self::Accel,
         Self::Temperature,
+        Self::Motion,
+        Self::Steps,
+        Self::TemperatureAux,
+        Self::Wear,
+        Self::SleepState,
+        Self::Battery,
+        Self::Events,
+        Self::Ppg,
     ];
 
     /// The name used in the upload path.
@@ -40,6 +65,14 @@ impl Stream {
             Self::RrInterval => "rr_interval",
             Self::Accel => "accel",
             Self::Temperature => "temperature",
+            Self::Motion => "motion",
+            Self::Steps => "steps",
+            Self::TemperatureAux => "temperature_aux",
+            Self::Wear => "wear",
+            Self::SleepState => "sleep_state",
+            Self::Battery => "battery",
+            Self::Events => "events",
+            Self::Ppg => "ppg",
         }
     }
 
@@ -51,6 +84,14 @@ impl Stream {
             Self::RrInterval => "ts,ms",
             Self::Accel => "ts,x,y,z",
             Self::Temperature => "ts,celsius",
+            Self::Motion => "ts,intensity,intensity_long",
+            Self::Steps => "ts,count",
+            Self::TemperatureAux => "ts,t1,t2",
+            Self::Wear => "ts,on,source",
+            Self::SleepState => "ts,state",
+            Self::Battery => "ts,pct,charging",
+            Self::Events => "ts,kind",
+            Self::Ppg => "ts,burst,value,accepted,motion",
         }
     }
 }
@@ -67,12 +108,26 @@ pub struct Row {
 /// Rows grouped by stream and UTC day (`YYYY-MM-DD`), each group sorted by time.
 pub type Batches = BTreeMap<(Stream, String), Vec<Row>>;
 
-/// Decodes every biometric record among `frames` and groups the rows for upload.
-/// Frames that are not biometric records are ignored.
+/// Decodes records and debug-log facts among `frames` and groups the rows for upload.
+///
+/// Frames must be in the order they were received, because log lines span packets.
+/// Other frames are ignored.
 pub fn batch<'a>(frames: impl IntoIterator<Item = &'a Frame>) -> Batches {
     let mut batches = Batches::new();
-    for summary in frames.into_iter().filter_map(BiometricSummary::parse) {
-        for (stream, row) in rows(&summary) {
+    let mut joiner = log::Joiner::new();
+    let mut battery = BatteryState::default();
+    for frame in frames {
+        let mut found = BiometricSummary::parse(frame)
+            .map(|summary| rows(&summary))
+            .unwrap_or_default();
+        found.extend(OpticalWindow::parse(frame).map_or_else(Vec::new, |w| ppg_rows(&w)));
+        for line in joiner.push(frame) {
+            if let Some(fact) = Fact::parse(&line.message) {
+                let ts_ms = i64::from(line.unix_seconds) * 1000;
+                found.push(battery.fact_row(ts_ms, &fact));
+            }
+        }
+        for (stream, row) in found {
             let day = utc_date(row.ts_ms.div_euclid(1000));
             batches.entry((stream, day)).or_default().push(row);
         }
@@ -82,6 +137,44 @@ pub fn batch<'a>(frames: impl IntoIterator<Item = &'a Frame>) -> Batches {
         rows.dedup_by_key(|row| row.ts_ms);
     }
     batches
+}
+
+/// The last battery percent and charging state seen, so each battery row carries both.
+#[derive(Debug, Default)]
+struct BatteryState {
+    percent: Option<f32>,
+    charging: Option<bool>,
+}
+
+impl BatteryState {
+    /// The row a log fact contributes, updating the battery state on the way.
+    fn fact_row(&mut self, ts_ms: i64, fact: &Fact) -> (Stream, Row) {
+        let (stream, values) = match fact {
+            Fact::Wear(on) => (Stream::Wear, format!("{},debug_log", flag(*on))),
+            Fact::SleepState(state) => (Stream::SleepState, state.clone()),
+            Fact::Battery(percent) => {
+                self.percent = Some(*percent);
+                (Stream::Battery, self.values())
+            }
+            Fact::Charging(charging) => {
+                self.charging = Some(*charging);
+                (Stream::Battery, self.values())
+            }
+            Fact::DoubleTap => (Stream::Events, "double_tap".to_owned()),
+            Fact::SpO2Computed => (Stream::Events, "spo2_computed".to_owned()),
+        };
+        (stream, Row { ts_ms, values })
+    }
+
+    fn values(&self) -> String {
+        let percent = self.percent.map(|p| format!("{p:.1}")).unwrap_or_default();
+        let charging = self.charging.map(flag).unwrap_or_default();
+        format!("{percent},{charging}")
+    }
+}
+
+const fn flag(on: bool) -> &'static str {
+    if on { "1" } else { "0" }
 }
 
 /// Renders one batch as CSV text, header first.
@@ -128,8 +221,44 @@ fn rows(summary: &BiometricSummary) -> Vec<(Stream, Row)> {
             },
         ));
     }
+    rows.extend(raw_rows(ts_ms, summary));
     rows
 }
+
+/// Rows for fields whose meaning is inferred, not confirmed. Values are passed on raw.
+fn raw_rows(ts_ms: i64, summary: &BiometricSummary) -> Vec<(Stream, Row)> {
+    let row = |values: String| Row { ts_ms, values };
+    let mut rows = Vec::new();
+    if summary.motion.is_finite() && summary.motion_long.is_finite() {
+        rows.push((
+            Stream::Motion,
+            row(format!("{},{}", summary.motion, summary.motion_long)),
+        ));
+    }
+    let [t1, t2] = summary.temperature_aux;
+    rows.push((Stream::Steps, row(summary.step_counter.to_string())));
+    rows.push((Stream::TemperatureAux, row(format!("{t1},{t2}"))));
+    rows
+}
+
+/// One row per optical sample, 40 ms apart from the window's second.
+fn ppg_rows(window: &OpticalWindow) -> Vec<(Stream, Row)> {
+    let start_ms = i64::from(window.unix_seconds) * 1000;
+    let accepted = flag(window.accepted);
+    (0_i64..)
+        .zip(&window.samples)
+        .map(|(i, value)| {
+            let row = Row {
+                ts_ms: start_ms + i * SAMPLE_MS,
+                values: format!("{},{value},{accepted},{}", window.burst, window.motion),
+            };
+            (Stream::Ppg, row)
+        })
+        .collect()
+}
+
+/// Spacing of optical samples: 25 Hz.
+const SAMPLE_MS: i64 = 40;
 
 /// Gives each interval its own timestamp: the beat that ends it. The last interval ends at
 /// the record's time and earlier ones are counted back from there. The strap does not send
@@ -186,6 +315,10 @@ mod tests {
             rr_intervals_ms: vec![1000, 950],
             gravity: [0.0, -0.5, 0.866],
             skin_temperature_c: Some(34.12),
+            motion: 0.25,
+            motion_long: -5.0,
+            step_counter: 1234,
+            temperature_aux: [318, 329],
         }
     }
 
@@ -223,6 +356,23 @@ mod tests {
             to_csv(Stream::Temperature, &csv(Stream::Temperature)),
             format!("ts,celsius\n{ts},34.12\n")
         );
+        assert_eq!(
+            to_csv(Stream::Motion, &csv(Stream::Motion)),
+            format!("ts,intensity,intensity_long\n{ts},0.25,-5\n")
+        );
+        assert_eq!(
+            to_csv(Stream::Steps, &csv(Stream::Steps)),
+            format!("ts,count\n{ts},1234\n")
+        );
+    }
+
+    #[test]
+    fn battery_rows_carry_the_last_known_percent_and_charging_state() {
+        let mut battery = BatteryState::default();
+        let first = battery.fact_row(1000, &Fact::Battery(30.8)).1;
+        let second = battery.fact_row(2000, &Fact::Charging(true)).1;
+        assert_eq!(first.values, "30.8,");
+        assert_eq!(second.values, "30.8,1");
     }
 
     #[test]

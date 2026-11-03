@@ -11,6 +11,7 @@ pub mod crc;
 pub mod export;
 pub mod frame;
 pub mod gatt;
+pub mod log;
 pub mod offload;
 pub mod reassembler;
 pub mod record;
