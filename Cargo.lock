@@ -473,6 +473,7 @@ dependencies = [
  "futures",
  "healthstrap-core",
  "rusqlite",
+ "serde",
  "serde_json",
  "tokio",
  "ureq",
