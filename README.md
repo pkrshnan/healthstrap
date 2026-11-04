@@ -1,7 +1,7 @@
 # healthstrap
 
 Reads a WHOOP 5.0 strap over Bluetooth, with no phone app or cloud account, and exports
-its data as one gzipped CSV per stream per day to the command-center ingest API.
+its data as one columnar JSON request per stream per day to the command-center ingest API.
 
 Runs on Linux and macOS as a command-line daemon, and on iOS as a small app. All three share
 one Rust core.
@@ -43,9 +43,11 @@ only by root, and the store in `/var/lib/healthstrap`. Pair the strap once with 
 before starting it. If the service cannot reach the adapter, check that your distribution's
 BlueZ policy allows the `bluetooth` group (`/etc/dbus-1/system.d/bluetooth.conf`).
 
-`upload` sends only rows it has not sent before, as one gzipped CSV per stream per UTC day:
-`POST <server>/api/ingest/samples/<stream>?day=YYYY-MM-DD` with `Authorization: Bearer <token>`,
-`Content-Type: text/csv` and `Content-Encoding: gzip`. The server merges rows by `ts`, so a
+`upload` sends only rows it has not sent before, as one protobuf JSON request per stream per UTC day:
+`POST <server>/v1/streams/<stream>:mergeSamples` with `Authorization: Bearer <token>` and
+`Content-Type: application/json`. The body contains a `{year, month, day}` UTC date,
+decimal-string `timestamps` (epoch milliseconds), and typed `columns` with `numbers` or
+`texts` values and `missingRows` indexes. The server merges rows by timestamp, so a
 retried upload is harmless.
 
 | Stream | Columns | Notes |

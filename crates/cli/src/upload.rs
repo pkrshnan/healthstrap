@@ -1,15 +1,15 @@
 //! Sends new rows to the command-center ingest API, and writes CSVs for inspection.
 
 use std::fs;
-use std::io::Write as _;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use flate2::Compression;
-use flate2::write::GzEncoder;
 use healthstrap_core::export::{self, Batches};
 
 use crate::store::Store;
+
+mod samples;
+use samples::MergeSamplesRequest;
 
 /// What one upload sent.
 #[derive(Debug, Default)]
@@ -34,17 +34,17 @@ pub fn upload(store: &Store, server: &str, token: &str) -> Result<Summary> {
     let batches = export::batch(frames.iter().map(|(_, frame)| frame));
     let mut summary = Summary::default();
     for ((stream, day), rows) in &batches {
-        let body = gzip(&export::to_csv(*stream, rows))?;
+        let request = MergeSamplesRequest::new(*stream, day, rows)?;
+        let body = serde_json::to_vec(&request)?;
         let url = format!(
-            "{}/api/ingest/samples/{}?day={day}",
+            "{}/v1/streams/{}:mergeSamples",
             server.trim_end_matches('/'),
             stream.name()
         );
         ureq::post(&url)
             .header("Authorization", &format!("Bearer {token}"))
-            .header("Content-Type", "text/csv")
-            .header("Content-Encoding", "gzip")
-            .send(&body[..])
+            .header("Content-Type", "application/json")
+            .send(body.as_slice())
             .with_context(|| format!("uploading {} for {day}", stream.name()))?;
         summary.files += 1;
         summary.rows += rows.len();
@@ -65,10 +65,4 @@ pub fn export_all(store: &Store, dir: &Path) -> Result<usize> {
             .with_context(|| format!("writing {}", path.display()))?;
     }
     Ok(batches.len())
-}
-
-fn gzip(text: &str) -> Result<Vec<u8>> {
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(text.as_bytes())?;
-    Ok(encoder.finish()?)
 }
