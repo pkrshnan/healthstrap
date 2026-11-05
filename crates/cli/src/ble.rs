@@ -145,35 +145,19 @@ impl Link {
     /// With `debug`, every byte sent and received is printed to stderr as hex.
     pub async fn open(peripheral: Peripheral, debug: bool) -> Result<Self> {
         connect(&peripheral).await?;
-        peripheral
-            .discover_services()
-            .await
-            .context("discovering services")?;
-
-        let characteristics = peripheral.characteristics();
-        let command_uuid = parse_uuid(gatt::COMMAND_WRITE)?;
-        let command = characteristics
-            .iter()
-            .find(|c| c.uuid == command_uuid)
-            .cloned()
-            .ok_or_else(|| anyhow!("strap has no command characteristic; is it a WHOOP 5.0?"))?;
-
-        for uuid in gatt::NOTIFY {
-            let uuid = parse_uuid(uuid)?;
-            if let Some(characteristic) = characteristics.iter().find(|c| c.uuid == uuid) {
-                peripheral.subscribe(characteristic).await?;
-                if debug {
-                    eprintln!("subscribed {uuid}");
-                }
-            } else if debug {
-                eprintln!("missing {uuid}");
+        // Without a `Link` nothing would close the connection, and a link left up blocks every
+        // later connect, so drop it before giving up.
+        match prepare(&peripheral, debug).await {
+            Ok(command) => Ok(Self {
+                peripheral,
+                command,
+                debug,
+            }),
+            Err(error) => {
+                let _ = peripheral.disconnect().await;
+                Err(error)
             }
         }
-        Ok(Self {
-            peripheral,
-            command,
-            debug,
-        })
     }
 
     /// Every notification's bytes, from all subscribed characteristics, in arrival order.
@@ -208,16 +192,58 @@ impl Link {
     }
 }
 
+/// Discovers services and subscribes to every notify characteristic, returning the command one.
+async fn prepare(peripheral: &Peripheral, debug: bool) -> Result<Characteristic> {
+    peripheral
+        .discover_services()
+        .await
+        .context("discovering services")?;
+
+    let characteristics = peripheral.characteristics();
+    let command_uuid = parse_uuid(gatt::COMMAND_WRITE)?;
+    let command = characteristics
+        .iter()
+        .find(|c| c.uuid == command_uuid)
+        .cloned()
+        .ok_or_else(|| anyhow!("strap has no command characteristic; is it a WHOOP 5.0?"))?;
+
+    for uuid in gatt::NOTIFY {
+        let uuid = parse_uuid(uuid)?;
+        if let Some(characteristic) = characteristics.iter().find(|c| c.uuid == uuid) {
+            peripheral.subscribe(characteristic).await?;
+            if debug {
+                eprintln!("subscribed {uuid}");
+            }
+        } else if debug {
+            eprintln!("missing {uuid}");
+        }
+    }
+    Ok(command)
+}
+
 /// How many times to try connecting before giving up.
 const CONNECT_ATTEMPTS: u32 = 4;
 
 /// Connects, retrying with growing pauses. A strap that just lost a connection can refuse new
 /// ones for a while, which `BlueZ` reports as `le-connection-abort-by-local`.
+///
+/// A failed attempt can leave `BlueZ` holding the link with its services never resolved, and
+/// connecting again over that link times out the same way ("Service discovery timed out")
+/// until something drops it. So every failed attempt drops its link, and a link left over from
+/// an earlier run, such as a daemon that crashed, is dropped before the first.
 async fn connect(peripheral: &Peripheral) -> Result<()> {
+    if peripheral.is_connected().await.unwrap_or(false) {
+        eprintln!("dropping a connection left from an earlier run");
+        let _ = peripheral.disconnect().await;
+    }
     let mut pause = Duration::from_secs(5);
     let mut attempt = 1;
     loop {
-        match peripheral.connect().await {
+        let result = peripheral.connect().await;
+        if result.is_err() {
+            let _ = peripheral.disconnect().await;
+        }
+        match result {
             Ok(()) => return Ok(()),
             Err(error) if attempt < CONNECT_ATTEMPTS => {
                 eprintln!(
