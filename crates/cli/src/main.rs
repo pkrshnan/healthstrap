@@ -68,7 +68,7 @@ enum Command {
         #[arg(long, default_value = "healthstrap.db")]
         db: PathBuf,
         /// Minutes to wait between syncs while the strap is in range.
-        #[arg(long, default_value_t = 15)]
+        #[arg(long, default_value_t = 5)]
         every_minutes: u64,
     },
     /// Write every stored record as CSV files, one per stream per day.
