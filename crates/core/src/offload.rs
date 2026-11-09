@@ -32,6 +32,8 @@ pub enum Step {
 #[derive(Debug, Default)]
 pub struct Offload {
     pending: Vec<Frame>,
+    /// The token of the last chunk handed over, which the caller has acknowledged.
+    last_token: Option<EndToken>,
 }
 
 impl Offload {
@@ -40,16 +42,27 @@ impl Offload {
     pub const fn new() -> Self {
         Self {
             pending: Vec::new(),
+            last_token: None,
         }
     }
 
     /// Takes one frame and says what to do next.
+    ///
+    /// A repeated end marker for the chunk just handed over is not handed over again. The
+    /// acknowledgement is a confirmed write, so the strap already has it. Acknowledging every
+    /// copy of a duplicated marker floods the strap with writes, and under that load it starts
+    /// sending chunks again, which feeds the flood. Records that came with the repeat stay
+    /// pending and go with the next chunk.
     pub fn on_frame(&mut self, frame: Frame) -> Step {
         match Marker::parse(&frame) {
-            Some(Marker::End(token)) => Step::ChunkReady {
-                frames: std::mem::take(&mut self.pending),
-                token,
-            },
+            Some(Marker::End(token)) if self.last_token == Some(token) => Step::Continue,
+            Some(Marker::End(token)) => {
+                self.last_token = Some(token);
+                Step::ChunkReady {
+                    frames: std::mem::take(&mut self.pending),
+                    token,
+                }
+            }
             Some(Marker::Complete) => Step::Complete {
                 unacknowledged: std::mem::take(&mut self.pending),
             },
@@ -110,6 +123,29 @@ mod tests {
             offload.on_frame(marker(3, [0; 8])),
             Step::Complete {
                 unacknowledged: vec![record(3)]
+            }
+        );
+    }
+
+    #[test]
+    fn hands_over_a_repeated_end_marker_only_once() {
+        let mut offload = Offload::new();
+        assert_eq!(offload.on_frame(record(1)), Step::Continue);
+        assert_eq!(
+            offload.on_frame(marker(2, [7; 8])),
+            Step::ChunkReady {
+                frames: vec![record(1)],
+                token: EndToken([7; 8])
+            }
+        );
+        assert_eq!(offload.on_frame(record(1)), Step::Continue);
+        assert_eq!(offload.on_frame(marker(2, [7; 8])), Step::Continue);
+        assert_eq!(offload.on_frame(record(2)), Step::Continue);
+        assert_eq!(
+            offload.on_frame(marker(2, [9; 8])),
+            Step::ChunkReady {
+                frames: vec![record(1), record(2)],
+                token: EndToken([9; 8])
             }
         );
     }
