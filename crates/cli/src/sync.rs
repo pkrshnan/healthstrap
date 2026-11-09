@@ -1,5 +1,6 @@
 //! One sync: open the session, drain history into the store, acknowledging each chunk.
 
+use std::fmt::Write as _;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
@@ -23,6 +24,8 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct Summary {
     /// Chunks saved and acknowledged.
     pub chunks: usize,
+    /// Frames received, including ones the store already had.
+    pub frames: usize,
     /// Frames that were new to the store.
     pub new_frames: usize,
     /// Whether the strap said it had nothing more to send.
@@ -49,7 +52,9 @@ pub async fn run(link: &Link, store: &mut Store, device: &str) -> Result<Summary
         &[],
     ))
     .await?;
-    await_reply(&mut frames, number::GET_DATA_RANGE, sequence.last()).await?;
+    let range = await_reply(&mut frames, number::GET_DATA_RANGE, sequence.last()).await?;
+    // The range layout is not decoded yet; log it raw so it can be matched against cursors.
+    println!("strap data range: {}", hex(&range));
 
     link.send(&command::send_historical_data(sequence.next()))
         .await?;
@@ -74,10 +79,19 @@ pub async fn run(link: &Link, store: &mut Store, device: &str) -> Result<Summary
                 link.send(&command::acknowledge_chunk(sequence.next(), &token))
                     .await?;
                 summary.chunks += 1;
+                summary.frames += chunk.len();
+                println!(
+                    "chunk {} acknowledged: {} frames ({} new) so far, trim cursor {}",
+                    summary.chunks,
+                    summary.frames,
+                    summary.new_frames,
+                    token.trim_cursor()
+                );
             }
             Step::Complete { unacknowledged } => {
                 summary.new_frames +=
                     store.commit_chunk(device, now_ms()?, &unacknowledged, None)?;
+                summary.frames += unacknowledged.len();
                 summary.complete = true;
                 break;
             }
@@ -105,12 +119,12 @@ fn frames(notifications: impl Stream<Item = Vec<u8>>) -> impl Stream<Item = Fram
         })
 }
 
-/// Waits for the final reply to a request. Pending replies are skipped.
+/// Waits for the final reply to a request and returns its body. Pending replies are skipped.
 async fn await_reply(
     frames: &mut (impl Stream<Item = Frame> + Unpin),
     command: u8,
     request_sequence: u8,
-) -> Result<()> {
+) -> Result<Vec<u8>> {
     let wait = async {
         while let Some(frame) = frames.next().await {
             let Some(reply) = Response::parse(&frame) else {
@@ -121,7 +135,7 @@ async fn await_reply(
             }
             match reply.outcome {
                 Outcome::Pending => {}
-                Outcome::Success => return Ok(()),
+                Outcome::Success => return Ok(reply.body.to_vec()),
                 Outcome::Failure | Outcome::Unsupported | Outcome::Unknown(_) => {
                     bail!("command {command} failed: {:?}", reply.outcome);
                 }
@@ -132,6 +146,13 @@ async fn await_reply(
     tokio::time::timeout(REPLY_TIMEOUT, wait)
         .await
         .with_context(|| format!("no reply to command {command}"))?
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().fold(String::new(), |mut out, byte| {
+        let _ = write!(out, "{byte:02x}");
+        out
+    })
 }
 
 /// The 8-bit request counter. It wraps, which the strap expects.

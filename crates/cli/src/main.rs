@@ -141,8 +141,8 @@ async fn sync_strap(strap: ble::Found, db: &Path, debug: bool) -> Result<()> {
         "stopped early; run again"
     };
     println!(
-        "{} chunks acknowledged, {} new frames, {status}",
-        summary.chunks, summary.new_frames
+        "{} chunks acknowledged, {} frames received ({} new), {status}",
+        summary.chunks, summary.frames, summary.new_frames
     );
     Ok(())
 }
