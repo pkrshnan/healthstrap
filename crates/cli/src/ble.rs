@@ -11,6 +11,7 @@ use btleplug::api::{
 use btleplug::platform::{Adapter, Manager, Peripheral, PeripheralId};
 use futures::{Stream, StreamExt};
 use healthstrap_core::gatt;
+use tokio::sync::OnceCell;
 use uuid::Uuid;
 
 /// A strap seen during a scan.
@@ -154,6 +155,7 @@ impl Link {
                 debug,
             }),
             Err(error) => {
+                unsubscribe_all(&peripheral).await;
                 let _ = peripheral.disconnect().await;
                 Err(error)
             }
@@ -186,8 +188,9 @@ impl Link {
             .context("writing command")
     }
 
-    /// Disconnects. Errors are ignored: the link may already be gone.
+    /// Unsubscribes and disconnects. Errors are ignored: the link may already be gone.
     pub async fn close(self) {
+        unsubscribe_all(&self.peripheral).await;
         let _ = self.peripheral.disconnect().await;
     }
 }
@@ -219,6 +222,20 @@ async fn prepare(peripheral: &Peripheral, debug: bool) -> Result<Characteristic>
         }
     }
     Ok(command)
+}
+
+/// Ends this process's notification subscriptions. `BlueZ` keeps a subscription across
+/// disconnects and turns it back on at the next connect, so the next sync starts from none
+/// rather than relying on how `BlueZ` treats a second subscribe. Errors are ignored.
+async fn unsubscribe_all(peripheral: &Peripheral) {
+    for characteristic in peripheral.characteristics() {
+        if gatt::NOTIFY
+            .iter()
+            .any(|uuid| parse_uuid(uuid).is_ok_and(|uuid| uuid == characteristic.uuid))
+        {
+            let _ = peripheral.unsubscribe(&characteristic).await;
+        }
+    }
 }
 
 /// How many times to try connecting before giving up.
@@ -259,12 +276,26 @@ async fn connect(peripheral: &Peripheral) -> Result<()> {
     }
 }
 
+/// The adapter, opened once and shared by every scan and sync in this process.
+///
+/// On Linux each `Manager` opens its own D-Bus connection, which btleplug never closes, and
+/// `BlueZ` keeps a notification subscription alive for every connection that ever subscribed,
+/// restoring it on each reconnect. With a new manager per sync, every notification arrived once
+/// more for each earlier sync, so the daemon acknowledged each chunk many times over until the
+/// link dropped mid-write, which `BlueZ` reports as ATT error 0x0e.
+static ADAPTER: OnceCell<Adapter> = OnceCell::const_new();
+
 async fn first_adapter() -> Result<Adapter> {
-    let manager = Manager::new().await.context("starting Bluetooth")?;
-    let Some(adapter) = manager.adapters().await?.into_iter().next() else {
-        bail!("no Bluetooth adapter found");
-    };
-    Ok(adapter)
+    ADAPTER
+        .get_or_try_init(|| async {
+            let manager = Manager::new().await.context("starting Bluetooth")?;
+            let Some(adapter) = manager.adapters().await?.into_iter().next() else {
+                bail!("no Bluetooth adapter found");
+            };
+            Ok(adapter)
+        })
+        .await
+        .cloned()
 }
 
 fn hex(bytes: &[u8]) -> String {
