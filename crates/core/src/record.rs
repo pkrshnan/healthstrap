@@ -151,12 +151,15 @@ impl LiveHeartRate {
     }
 }
 
-/// Reads `count` R-R words in 1/1024 s and converts them to rounded milliseconds.
+/// Reads `count` R-R words, each already in milliseconds.
+///
+/// Not the 1/1024 s of the Bluetooth Heart Rate Service: read as ms, the intervals add up to the
+/// elapsed time and match the strap's own heart rate, and read as 1/1024 s they come out 2.34%
+/// short.
 fn rr_intervals(bytes: &[u8], start: usize, count: usize) -> Vec<u16> {
     (0..count)
         .filter_map(|i| u16_at(bytes, start + 2 * i))
-        .filter(|&ticks| ticks > 0)
-        .filter_map(|ticks| u16::try_from((u32::from(ticks) * 1000 + 512) / 1024).ok())
+        .filter(|&ms| ms > 0)
         .collect()
 }
 
@@ -203,7 +206,7 @@ mod tests {
                 record_index: 42,
                 unix_seconds: 1_793_600_000,
                 heart_rate: 61,
-                rr_intervals_ms: vec![1000, 957],
+                rr_intervals_ms: vec![1024, 980],
                 gravity: [0.0, 0.0, 1.0],
                 skin_temperature_c: Some(34.12),
                 motion: 0.25,
@@ -260,7 +263,7 @@ mod tests {
         let live = LiveHeartRate::parse(&strap_frame(&body));
         assert_eq!(
             live.map(|l| (l.heart_rate, l.rr_intervals_ms)),
-            Some((72, vec![830]))
+            Some((72, vec![850]))
         );
     }
 }
