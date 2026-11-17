@@ -10,6 +10,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use tokio::net::UnixListener;
+use tokio::sync::mpsc;
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -71,6 +73,13 @@ enum Command {
         #[arg(long, default_value_t = 5)]
         every_minutes: u64,
     },
+    /// Ask a running `daemon` to sync now rather than at its next round. If the strap is out of
+    /// range, the daemon syncs as soon as it hears it, as it always does.
+    SyncNow {
+        /// Path of the daemon's local store.
+        #[arg(long, default_value = "healthstrap.db")]
+        db: PathBuf,
+    },
     /// Write every stored record as CSV files, one per stream per day.
     Export {
         /// Folder to write into.
@@ -99,6 +108,7 @@ async fn main() -> Result<()> {
             db,
             every_minutes,
         } => daemon(&server, device.as_deref(), &db, every_minutes).await?,
+        Command::SyncNow { db } => sync_now(&db)?,
         Command::Export { out, db } => {
             let files = upload::export_all(&store::Store::open(&db)?, &out)?;
             println!("wrote {files} files to {}", out.display());
@@ -165,6 +175,7 @@ const ADAPTER_RETRY: Duration = Duration::from_secs(60);
 async fn daemon(server: &str, device: Option<&str>, db: &Path, every_minutes: u64) -> Result<()> {
     let token = token()?;
     let every = Duration::from_secs(every_minutes.saturating_mul(60));
+    let mut requests = listen_for_requests(db)?;
     let mut state = Daemon::default();
     println!("listening for the strap");
     loop {
@@ -174,7 +185,7 @@ async fn daemon(server: &str, device: Option<&str>, db: &Path, every_minutes: u6
                 let synced = sync_strap(strap, db, false).await;
                 state.synced(synced);
                 state.uploaded(upload_blocking(db, server, &token));
-                tokio::time::sleep(state.pause(every)).await;
+                rest(&mut requests, state.pause(every)).await;
             }
             Ok(None) => {
                 state.away();
@@ -188,6 +199,63 @@ async fn daemon(server: &str, device: Option<&str>, db: &Path, every_minutes: u6
             }
         }
     }
+}
+
+/// Where the daemon listens for `sync-now`: next to its store, so both find it from `--db`.
+fn request_socket(db: &Path) -> PathBuf {
+    let mut path = db.as_os_str().to_owned();
+    path.push(".sock");
+    PathBuf::from(path)
+}
+
+/// Starts accepting `sync-now` requests. Requests that arrive while one is already waiting are
+/// folded into it.
+fn listen_for_requests(db: &Path) -> Result<mpsc::Receiver<()>> {
+    let path = request_socket(db);
+    // A daemon that stopped without cleaning up leaves its socket behind.
+    match std::fs::remove_file(&path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Err(error).with_context(|| format!("removing {}", path.display()));
+        }
+        _ => {}
+    }
+    let listener =
+        UnixListener::bind(&path).with_context(|| format!("listening at {}", path.display()))?;
+    let (sender, receiver) = mpsc::channel(1);
+    tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok(_) => {
+                    println!("sync requested");
+                    let _ = sender.try_send(());
+                }
+                Err(error) => eprintln!("sync-now request failed: {error:#}"),
+            }
+        }
+    });
+    Ok(receiver)
+}
+
+/// Waits out `pause`, or less if `sync-now` asks for a sync. Requests from before this were
+/// answered by the sync that just ran, so they are dropped.
+async fn rest(requests: &mut mpsc::Receiver<()>, pause: Duration) {
+    while requests.try_recv().is_ok() {}
+    tokio::select! {
+        () = tokio::time::sleep(pause) => {}
+        Some(()) = requests.recv() => {}
+    }
+}
+
+fn sync_now(db: &Path) -> Result<()> {
+    let path = request_socket(db);
+    std::os::unix::net::UnixStream::connect(&path).with_context(|| {
+        format!(
+            "no daemon is listening at {}; is `healthstrap daemon` running with this --db?",
+            path.display()
+        )
+    })?;
+    println!("asked the daemon to sync; its log shows the result");
+    Ok(())
 }
 
 /// Uploading blocks on the network; let the runtime move other work off this thread.
