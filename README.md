@@ -23,6 +23,7 @@ cargo run --release -- sync            # download history into healthstrap.db
 cargo run --release -- export --out csv  # write csv/<stream>/<day>.csv to look at
 HEALTHSTRAP_TOKEN=... cargo run --release -- upload --server https://your-server
 HEALTHSTRAP_TOKEN=... cargo run --release -- daemon --server https://your-server
+cargo run --release -- sync-now        # ask the running daemon to sync now
 ```
 
 `daemon` keeps a Bluetooth scan running and syncs as soon as it hears the strap advertise, so
@@ -31,6 +32,11 @@ again every 5 minutes (`--every-minutes`). A sync that fails while the strap is 
 after 1, 2, 4 minutes, up to that interval, and an upload that fails is retried every few
 minutes even while the strap is away. It logs only changes (`strap in range`, `strap out of
 range; listening`), so it can run unattended.
+
+`sync-now` asks a running daemon to sync now instead of waiting out its interval. It finds the
+daemon through a socket next to the store (`healthstrap.db.sock`), so give it the same `--db`.
+In the container: `docker exec <container> healthstrap sync-now --db /data/healthstrap.db`.
+If the strap is out of range, the daemon syncs as soon as it hears it.
 
 The strap stops advertising while something else holds its connection, such as your phone, so
 keep the phone's Bluetooth off for the strap or the daemon will treat it as away.
